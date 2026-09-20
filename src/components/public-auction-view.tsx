@@ -20,6 +20,8 @@ import { PlayerRevealAnimation } from '@/components/player-reveal-animation'
 import { GoingLiveBanner } from '@/components/going-live-banner'
 import { extractCricheroesLink } from '@/lib/cricheroes'
 import { extractBattingStats, extractBowlingStats } from '@/lib/cricket-stats'
+import { extractProxyImageUrl } from '@/lib/player-photo'
+import { extractPlayerName } from '@/lib/player-name'
 import { BatIcon, BallIcon, StatTile } from '@/components/cricket-stat-ui'
 // Memoized components for performance
 import { StatsDisplay } from '@/components/public-auction-view/memoized-components'
@@ -121,19 +123,32 @@ function SoldTicker({ sales, variant = 'floating' }: { sales: RecentSale[]; vari
   const positionClasses = variant === 'floating'
     ? 'fixed bottom-0 left-0 right-0 z-30 sm:static sm:z-auto'
     : 'flex-shrink-0'
+  // Presenter gets a much bigger banner than regular viewers - it's read
+  // from across a room on a projector, not held in a hand a foot from the
+  // eyes, so it needs a size closer to the rest of the presenter stage's
+  // own scale (which already runs text-3xl+ for the player name).
+  const containerSizeClasses = variant === 'inline' ? 'h-16 border-t-2' : 'h-8 sm:h-9 border-t'
+  const itemSizeClasses = variant === 'inline' ? 'gap-3 px-10 text-xl' : 'gap-2 px-6 text-xs sm:text-sm'
+  const labelSizeClasses = variant === 'inline' ? 'px-8 text-base' : 'px-3 sm:px-4 text-[9px] sm:text-[11px]'
   return (
-    <div className={`${positionClasses} bg-[#05070a] border-t border-amber-500/30 overflow-hidden h-8 sm:h-9 flex items-center`}>
-      {/* Content rendered twice so the loop from -50% back to 0% is
-          invisible - see .animate-ticker-scroll in globals.css. */}
-      <div className="flex whitespace-nowrap animate-ticker-scroll">
-        {[...sales, ...sales].map((sale, i) => (
-          <span key={`${sale.id}-${i}`} className="inline-flex items-center gap-2 px-6 text-xs sm:text-sm font-bold flex-shrink-0">
-            <span className="text-white uppercase">{sale.name}</span>
-            <span className="text-gray-600">&rarr;</span>
-            <span className="text-amber-400">{sale.buyer}</span>
-            <span className="text-emerald-400 tabular-nums">₹{sale.price.toLocaleString('en-IN')}</span>
-          </span>
-        ))}
+    <div className={`${positionClasses} ${containerSizeClasses} bg-[#05070a] border-amber-500/30 flex items-center`}>
+      {/* Fixed label, never scrolls - only the sales list to its right does. */}
+      <div className={`flex-shrink-0 h-full flex items-center bg-amber-500/10 border-r border-amber-500/30 font-black uppercase tracking-widest text-amber-400 whitespace-nowrap ${labelSizeClasses}`}>
+        Last 5 Sales
+      </div>
+      <div className="flex-1 min-w-0 overflow-hidden">
+        {/* Content rendered twice so the loop from -50% back to 0% is
+            invisible - see .animate-ticker-scroll in globals.css. */}
+        <div className="flex whitespace-nowrap animate-ticker-scroll">
+          {[...sales, ...sales].map((sale, i) => (
+            <span key={`${sale.id}-${i}`} className={`inline-flex items-center flex-shrink-0 font-bold ${itemSizeClasses}`}>
+              <span className="text-white uppercase">{sale.name}</span>
+              <span className="text-gray-600">&rarr;</span>
+              <span className="text-amber-400">{sale.buyer}</span>
+              <span className="text-emerald-400 tabular-nums">₹{sale.price.toLocaleString('en-IN')}</span>
+            </span>
+          ))}
+        </div>
       </div>
     </div>
   )
@@ -698,7 +713,7 @@ export function PublicAuctionView({ auction, currentPlayer: initialPlayer, stats
   // the derived stats below were previously recomputed from scratch on
   // every render regardless of whether the player on screen had changed.
   const playerData = useMemo(() => getPlayerData(currentPlayer), [currentPlayer])
-  const playerName = playerData.name || playerData.Name || 'No Player Selected'
+  const playerName = extractPlayerName(playerData) || 'No Player Selected'
   // extractBattingStats/extractBowlingStats each rebuild a normalized map of
   // every field on the player's raw uploaded data - real, avoidable work
   // when only the purse/bid amount changed, not the player.
@@ -773,7 +788,7 @@ export function PublicAuctionView({ auction, currentPlayer: initialPlayer, stats
     const names = allPlayers
       .map(p => {
         const data = p.data as any
-        return data?.name || data?.Name || data?.player_name || null
+        return extractPlayerName(data) || null
       })
       .filter((name): name is string => name !== null && name !== undefined && name !== '')
     
@@ -783,44 +798,11 @@ export function PublicAuctionView({ auction, currentPlayer: initialPlayer, stats
   const pendingPlayerName = useMemo(() => {
     if (!pendingPlayer) return ''
     const data = pendingPlayer.data as any
-    return data?.name || data?.Name || data?.player_name || 'Unknown Player'
+    return extractPlayerName(data) || 'Unknown Player'
   }, [pendingPlayer])
 
   const getProfilePhotoUrl = useCallback((playerData: any): string | undefined => {
-    const possibleKeys = [
-      'Profile Photo',
-      'profile photo',
-      'Profile photo',
-      'PROFILE PHOTO',
-      'profile_photo',
-      'ProfilePhoto'
-    ]
-
-    const rawValue = possibleKeys
-      .map(key => playerData?.[key])
-      .find(value => value !== undefined && value !== null && String(value).trim() !== '')
-
-    if (!rawValue) {
-      return undefined
-    }
-
-    const photoStr = String(rawValue).trim()
-
-    let match = photoStr.match(/\/d\/([a-zA-Z0-9_-]+)/)
-    if (match && match[1]) {
-      return `/api/proxy-image?id=${match[1]}`
-    }
-
-    match = photoStr.match(/[?&]id=([a-zA-Z0-9_-]+)/)
-    if (match && match[1]) {
-      return `/api/proxy-image?id=${match[1]}`
-    }
-
-    if (photoStr.startsWith('http://') || photoStr.startsWith('https://')) {
-      return photoStr
-    }
-
-    return undefined
+    return extractProxyImageUrl(playerData)
   }, [])
 
   // Presenter mode (?presenter=1) is a dedicated full-screen stage meant to
@@ -906,6 +888,15 @@ export function PublicAuctionView({ auction, currentPlayer: initialPlayer, stats
                   {/* Left: photo - dominant, not full-bleed */}
                   <div className="relative w-[58%] h-full overflow-hidden bg-gradient-to-br from-[#1c2b2a] via-[#10181b] to-[#05070a] flex-shrink-0">
                     <div className="absolute -top-[30%] left-[10%] w-24 h-[160%] bg-gradient-to-b from-amber-400/10 to-transparent blur-sm rotate-[-10deg] pointer-events-none" />
+                    {/* Auction number plaque - the same number the team hands
+                        the winning bidder on a physical placard. Presenter
+                        mode is projected for a whole room to read, so this
+                        gets the biggest treatment of anywhere it appears. */}
+                    {currentPlayer?.serialNumber != null && (
+                      <div className="absolute top-6 left-6 z-20 flex items-center justify-center w-24 h-24 lg:w-32 lg:h-32 rounded-3xl bg-gradient-to-br from-amber-400 to-amber-600 border-4 border-white/90 shadow-2xl">
+                        <span className="text-5xl lg:text-6xl font-black text-[#1a1200] tabular-nums leading-none">{currentPlayer.serialNumber}</span>
+                      </div>
+                    )}
                     {presenterPhotoUrl ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img src={presenterPhotoUrl} alt={playerName} className="w-full h-full object-contain" />
@@ -1018,6 +1009,9 @@ export function PublicAuctionView({ auction, currentPlayer: initialPlayer, stats
                           </div>
                         )}
                       </div>
+                    )}
+                    {(presenterBattingStats || presenterBowlingStats) && (
+                      <p className="text-[10px] text-white/30 -mt-4 mb-4">Stats accurate as of 15 September 2026</p>
                     )}
 
                     <div className="flex items-center gap-2 flex-wrap">
@@ -1215,28 +1209,9 @@ export function PublicAuctionView({ auction, currentPlayer: initialPlayer, stats
                       teamName: currentPlayer.lastYearTeamName,
                       auctionName: currentPlayer.lastYearAuctionName,
                     } : null}
+                    serialNumber={currentPlayer?.serialNumber}
                     name={playerName}
-                    imageUrl={(() => {
-                      const keys = ['Profile Photo', 'profile photo', 'Profile photo', 'PROFILE PHOTO', 'profile_photo', 'ProfilePhoto']
-                      const value = keys.map(key => playerData?.[key]).find(v => v && String(v).trim())
-                      if (!value) {
-                        console.log('DEBUG - Player data fields:', Object.keys(playerData))
-                        return undefined
-                      }
-                      const photoStr = String(value).trim()
-                      let match = photoStr.match(/\/d\/([a-zA-Z0-9_-]+)/)
-                      if (match && match[1]) {
-                        return `/api/proxy-image?id=${match[1]}`
-                      }
-                      match = photoStr.match(/[?&]id=([a-zA-Z0-9_-]+)/)
-                      if (match && match[1]) {
-                        return `/api/proxy-image?id=${match[1]}`
-                      }
-                      if (photoStr.startsWith('http://') || photoStr.startsWith('https://')) {
-                        return photoStr
-                      }
-                      return undefined
-                    })()}
+                    imageUrl={extractProxyImageUrl(playerData)}
                     basePrice={(currentPlayer?.data as any)?.['Base Price'] || (currentPlayer?.data as any)?.['base price'] || 1000}
                     tags={((currentPlayer as any)?.isIcon || (currentPlayer?.data as any)?.isIcon) ? [{ label: 'Bidder Choice', color: 'purple' }] : []}
                     profileLink={cricherosLink}
@@ -1261,6 +1236,9 @@ export function PublicAuctionView({ auction, currentPlayer: initialPlayer, stats
                       return essentials
                     })()}
                   />
+                  {(battingStats || bowlingStats) && (
+                    <p className="text-[9px] text-gray-400 dark:text-gray-500 text-center -mt-1 mb-1">Stats accurate as of 15 September 2026</p>
+                  )}
 
                   {/* "All Players & Teams" already lives in the header
                       (always visible, not just here) - a second copy of the

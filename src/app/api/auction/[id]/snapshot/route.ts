@@ -5,6 +5,7 @@ import { isLiveStatus } from '@/lib/auction-status'
 import { parseBidHistory, filterBidHistoryForCurrentPlayer } from '@/lib/auction-view-data'
 import { logEventAsync, describeError } from '@/lib/observability'
 import { getCachedBidderPurses, getCachedPlayerStatuses } from '@/lib/cache'
+import { extractPlayerName } from '@/lib/player-name'
 
 // Read-only "current truth" snapshot for viewers who aren't on a live Pusher
 // connection - the polling fallback for the public auction view's
@@ -80,6 +81,7 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
             select: {
               id: true, auctionId: true, data: true, status: true, isIcon: true, soldTo: true, soldPrice: true,
               lastYearPrice: true, lastYearTeamName: true, lastYearBidderName: true, lastYearAuctionName: true,
+              serialNumber: true,
             },
           })
         : Promise.resolve(null),
@@ -116,13 +118,6 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
     // auction's entire history instead of just the current lot.
     const bidHistory = filterBidHistoryForCurrentPlayer(parseBidHistory(auction.bidHistory), currentPlayer?.id)
 
-    // Same name-extraction fallback keys the client already uses for every
-    // other player display - kept server-side here since only the name is
-    // needed, not the rest of the uploaded data blob.
-    const extractPlayerName = (data: unknown): string => {
-      const record = data as Record<string, unknown> | null | undefined
-      return String(record?.name || record?.Name || record?.player_name || 'Unknown Player')
-    }
     const buyerIds = [...new Set(recentSoldPlayers.map(p => p.soldTo).filter((id): id is string => !!id))]
     const buyers = buyerIds.length > 0
       ? await prisma.bidder.findMany({ where: { id: { in: buyerIds } }, select: { id: true, teamName: true, username: true } })
@@ -131,7 +126,7 @@ export async function GET(request: NextRequest, { params }: { params: { id: stri
       const buyer = buyers.find(b => b.id === p.soldTo)
       return {
         id: p.id,
-        name: extractPlayerName(p.data),
+        name: extractPlayerName(p.data as Record<string, unknown> | null | undefined) || 'Unknown Player',
         price: p.soldPrice ?? 0,
         buyer: buyer?.teamName || buyer?.username || 'Unknown',
       }

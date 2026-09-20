@@ -6,6 +6,7 @@ import { invalidateAuction } from '@/lib/cache'
 import path from 'path'
 import fs from 'fs'
 import * as XLSX from 'xlsx'
+import { extractPlayerName } from '@/lib/player-name'
 
 type ParsedRow = {
   bidderName: string
@@ -128,7 +129,7 @@ export async function POST(request: NextRequest) {
   const playerNameToId = new Map<string, string>()
   for (const p of players) {
     const pdata = (p.data as any) || {}
-    const name = normalizeName(pdata.name || pdata.Name || '')
+    const name = normalizeName(extractPlayerName(pdata) || '')
     if (name) playerNameToId.set(name, p.id)
   }
 

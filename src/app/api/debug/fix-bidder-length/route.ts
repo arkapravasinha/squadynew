@@ -3,6 +3,8 @@ import { getServerSession } from 'next-auth'
 import { authOptions } from '@/app/api/auth/[...nextauth]/config'
 import { prisma } from '@/lib/prisma'
 import bcrypt from 'bcryptjs'
+import { extractProfilePhotoValue, extractGoogleDriveFileId } from '@/lib/player-photo'
+import { extractPlayerName } from '@/lib/player-name'
 
 /**
  * POST /api/debug/fix-bidder-length
@@ -68,7 +70,7 @@ export async function POST(request: NextRequest) {
     // Process each retired player
     for (const player of auction.players) {
       const playerData = player.data as any
-      const playerName = playerData?.name || playerData?.Name || 'Retired Player'
+      const playerName = extractPlayerName(playerData) || 'Retired Player'
       const teamName = playerData?.['Team Name'] || playerData?.['team name'] || playerData?.teamName || playerName
       const expectedUsername = `retired_${player.id}`
 
@@ -114,21 +116,12 @@ export async function POST(request: NextRequest) {
         }
 
         // Get profile photo URL for bidderPhotoUrl
-        const photoKeys = ['Profile Photo', 'profile photo', 'Profile photo', 'PROFILE PHOTO', 'profile_photo', 'ProfilePhoto']
-        const photoValue = photoKeys.map(key => playerData?.[key]).find(v => v && String(v).trim())
+        const photoValue = extractProfilePhotoValue(playerData)
         let bidderPhotoUrl = null
         if (photoValue) {
-          const photoStr = String(photoValue).trim()
-          // Try multiple Google Drive URL patterns
-          let match = photoStr.match(/\/d\/([a-zA-Z0-9_-]+)/)
-          if (!match) {
-            match = photoStr.match(/[?&]id=([a-zA-Z0-9_-]+)/)
-          }
-          if (!match) {
-            match = photoStr.match(/file\/d\/([a-zA-Z0-9_-]+)/)
-          }
-          if (match && match[1]) {
-            bidderPhotoUrl = `/api/proxy-image?id=${match[1]}`
+          const fileId = extractGoogleDriveFileId(photoValue)
+          if (fileId) {
+            bidderPhotoUrl = `/api/proxy-image?id=${fileId}`
           }
         }
 

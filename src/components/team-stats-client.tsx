@@ -15,6 +15,8 @@ import Link from 'next/link'
 import { initializePusher } from '@/lib/pusher-client'
 import { extractCricheroesLink } from '@/lib/cricheroes'
 import { extractBattingStats, extractBowlingStats } from '@/lib/cricket-stats'
+import { extractProxyImageUrl } from '@/lib/player-photo'
+import { extractPlayerName } from '@/lib/player-name'
 import { BatIcon, BallIcon } from '@/components/cricket-stat-ui'
 import { PlayerStatsDialog } from '@/components/player-stats-dialog'
 
@@ -160,44 +162,11 @@ export function TeamStatsClient({ auction: initialAuction }: TeamStatsClientProp
   // Helper functions - must be defined before use
   const getPlayerName = (player: Player) => {
     const data = player.data as any
-    return data?.name || data?.Name || data?.player_name || 'Unknown Player'
+    return extractPlayerName(data) || 'Unknown Player'
   }
 
   function getProfilePhotoUrl(playerData: any): string | undefined {
-    const possibleKeys = [
-      'Profile Photo',
-      'profile photo',
-      'Profile photo',
-      'PROFILE PHOTO',
-      'profile_photo',
-      'ProfilePhoto'
-    ]
-
-    const rawValue = possibleKeys
-      .map(key => playerData?.[key])
-      .find(value => value !== undefined && value !== null && String(value).trim() !== '')
-
-    if (!rawValue) {
-      return undefined
-    }
-
-    const photoStr = String(rawValue).trim()
-
-    let match = photoStr.match(/\/d\/([a-zA-Z0-9_-]+)/)
-    if (match && match[1]) {
-      return `/api/proxy-image?id=${match[1]}`
-    }
-
-    match = photoStr.match(/[?&]id=([a-zA-Z0-9_-]+)/)
-    if (match && match[1]) {
-      return `/api/proxy-image?id=${match[1]}`
-    }
-
-    if (photoStr.startsWith('http://') || photoStr.startsWith('https://')) {
-      return photoStr
-    }
-
-    return undefined
+    return extractProxyImageUrl(playerData)
   }
 
   // Get bidder logo/photo - prioritize team logo (logoUrl), fallback to bidderPhotoUrl for retired players

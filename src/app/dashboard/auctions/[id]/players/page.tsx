@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import { useParams, useRouter } from 'next/navigation'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -9,7 +9,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { DataTable, DataTableColumn } from '@/components/data-table'
 import { parseExcelFile, ParsedPlayerData, validatePlayerData, cleanPlayerData } from '@/lib/excel-parser'
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, Loader2, Plus, BarChart3 } from 'lucide-react'
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, Loader2, Plus, BarChart3, Hash, Download } from 'lucide-react'
 import { logger } from '@/lib/logger'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Label } from '@/components/ui/label'
@@ -19,6 +19,60 @@ interface Player {
   data: Record<string, any>
   status: string
   createdAt: string
+  lastYearPrice?: number | null
+  serialNumber?: number | null
+}
+
+// Inline-editable cell for a player's Last Year Price - a manual correction
+// for the auction-history matcher's guess (a Cricheroes-link or name match
+// can miss entirely, or land on the wrong same-named player), rather than a
+// full "Edit Player" round trip for a single number. Uncontrolled-ish local
+// state so typing doesn't fight the table's own re-renders; saves on blur
+// or Enter, and resets to the last-saved value on an invalid entry.
+// Callers key this component on `${item.id}-${value}` rather than syncing
+// value via a useEffect - a key change on an external update (a successful
+// save, or a fresh fetch) simply remounts the component with fresh initial
+// state, which is the pattern React itself recommends over an effect for
+// "reset this state when a prop changes".
+function LastYearPriceCell({ value, onSave }: { value: number | null; onSave: (newValue: number | null) => Promise<void> }) {
+  const [inputValue, setInputValue] = useState(value != null ? String(value) : '')
+  const [saving, setSaving] = useState(false)
+
+  const commit = async () => {
+    const trimmed = inputValue.trim()
+    const parsed = trimmed === '' ? null : Number(trimmed)
+    if (parsed !== null && (!Number.isFinite(parsed) || parsed < 0)) {
+      setInputValue(value != null ? String(value) : '')
+      return
+    }
+    if (parsed === value) return
+    setSaving(true)
+    await onSave(parsed)
+    setSaving(false)
+  }
+
+  return (
+    <Input
+      // A plain text input with numeric filtering, not type="number" - a
+      // controlled type="number" input is a known React footgun where the
+      // DOM's own value can drift out of sync with React's tracked state
+      // (e.g. around a leading "-", an in-progress decimal, or an empty
+      // string), leaving the field visually present but unresponsive to
+      // further keystrokes. inputMode="numeric" still gives mobile users
+      // the numeric keypad.
+      type="text"
+      inputMode="numeric"
+      value={inputValue}
+      onChange={(e) => setInputValue(e.target.value.replace(/[^0-9]/g, ''))}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
+      }}
+      disabled={saving}
+      placeholder="—"
+      className="h-8 w-24 text-sm border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100"
+    />
+  )
 }
 
 export default function PlayerManagement() {
@@ -39,6 +93,9 @@ export default function PlayerManagement() {
   const [auctionRules, setAuctionRules] = useState<any>(null)
   const [selectedPlayerIds, setSelectedPlayerIds] = useState<Set<string>>(new Set())
   const [batchProcessing, setBatchProcessing] = useState(false)
+  const [assigningSerialNumbers, setAssigningSerialNumbers] = useState(false)
+  const [exportingPlayers, setExportingPlayers] = useState(false)
+  const [auctionName, setAuctionName] = useState('')
   const [visibleColumns, setVisibleColumns] = useState<string[]>([])
   const [auctionStatus, setAuctionStatus] = useState<string>('DRAFT')
   const [isPublished, setIsPublished] = useState<boolean>(false)
@@ -80,6 +137,7 @@ export default function PlayerManagement() {
         // Store auction status and published state
         setAuctionStatus(data.auction.status)
         setIsPublished(data.auction.isPublished || false)
+        setAuctionName(data.auction.name || '')
         
         // Load saved column order if available
         if (data.auction.columnOrder && Array.isArray(data.auction.columnOrder)) {
@@ -434,6 +492,66 @@ export default function PlayerManagement() {
     }
   }
 
+  // Stable identity via useCallback so referencing it inside tableColumns'
+  // useMemo below doesn't force that memo to recompute (and re-sort/re-map
+  // the whole player list) on every render.
+  const handleLastYearPriceEdit = useCallback(async (playerId: string, newValue: number | null) => {
+    try {
+      const response = await fetch(`/api/auctions/${auctionId}/players/${playerId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lastYearPrice: newValue }),
+      })
+      const result = await response.json()
+      if (response.ok) {
+        setPlayers(prev => prev.map(p => p.id === playerId ? { ...p, lastYearPrice: result.player.lastYearPrice } : p))
+      } else {
+        setError(result.error || 'Failed to update Last Year Price')
+      }
+    } catch (error) {
+      setError('Network error while updating Last Year Price')
+      logger.error('Error updating lastYearPrice:', error)
+    }
+  }, [auctionId])
+
+  const handleAssignSerialNumbers = async () => {
+    const eligibleCount = players.filter(p => p.status !== 'RETIRED').length
+    if (eligibleCount === 0) {
+      setError('No non-retired players to assign numbers to.')
+      return
+    }
+    if (!confirm(
+      `Assign a random permanent number (1 to ${eligibleCount}) to every non-retired player? ` +
+      `Players that already have a number keep it - this only fills in the ones that don't.`
+    )) {
+      return
+    }
+
+    try {
+      setAssigningSerialNumbers(true)
+      setError('')
+      const response = await fetch(`/api/auctions/${auctionId}/players/assign-serial-numbers`, {
+        method: 'POST',
+      })
+      const result = await response.json()
+      if (response.ok) {
+        setSuccess(
+          result.assignedCount > 0
+            ? `Assigned numbers to ${result.assignedCount} player${result.assignedCount !== 1 ? 's' : ''}.`
+            : result.message || 'Every non-retired player already has a serial number.'
+        )
+        await fetchPlayers()
+      } else {
+        setError(result.error || 'Failed to assign serial numbers')
+      }
+    } catch (error) {
+      setError('Network error while assigning serial numbers')
+      logger.error('Error assigning serial numbers:', error)
+    } finally {
+      setAssigningSerialNumbers(false)
+    }
+  }
+
   const handleDeletePlayer = async (player: any) => {
     logger.log('Delete player clicked')
     if (!confirm('Are you sure you want to delete this player?')) return
@@ -611,7 +729,9 @@ export default function PlayerManagement() {
     id: player.id,
     status: player.status,
     isIcon: (player as any).isIcon || false,
-    createdAt: new Date(player.createdAt).toLocaleDateString()
+    createdAt: new Date(player.createdAt).toLocaleDateString(),
+    lastYearPrice: player.lastYearPrice ?? null,
+    serialNumber: player.serialNumber ?? null
   })).sort((a, b) => {
     // Sort by isIcon (Bidder Choice first), then by createdAt
     if (a.isIcon !== b.isIcon) {
@@ -622,6 +742,21 @@ export default function PlayerManagement() {
 
   // Create DataTable columns
   const tableColumns: DataTableColumn[] = useMemo(() => [
+    {
+      key: 'serialNumber',
+      label: '#',
+      sortable: true,
+      type: 'number',
+      render: (value: number | null) => (
+        value != null ? (
+          <span className="inline-flex items-center justify-center min-w-[2rem] h-8 px-2 rounded-md bg-teal-600 text-white font-black text-sm tabular-nums">
+            {value}
+          </span>
+        ) : (
+          <span className="text-gray-400 dark:text-gray-600 text-sm">—</span>
+        )
+      )
+    },
     ...columns.map(col => ({
       key: col,
       label: col,
@@ -629,6 +764,19 @@ export default function PlayerManagement() {
       filterable: true,
       type: typeof (tableData[0] as any)?.[col] === 'number' ? 'number' as const : 'string' as const
     })),
+    {
+      key: 'lastYearPrice',
+      label: 'Last Year Price',
+      sortable: true,
+      type: 'number',
+      render: (value: number | null, item: Record<string, any>) => (
+        <LastYearPriceCell
+          key={`${item.id}-${value}`}
+          value={value ?? null}
+          onSave={(newValue) => handleLastYearPriceEdit(item.id, newValue)}
+        />
+      )
+    },
     {
       key: 'isIcon',
       label: 'Bidder Choice',
@@ -682,7 +830,67 @@ export default function PlayerManagement() {
       label: 'Added',
       sortable: true
     }
-  ], [columns, tableData])
+  ], [columns, tableData, handleLastYearPriceEdit])
+
+  // The "#" (serial number) column is always shown by default, even for an
+  // auction whose visibleColumns was saved before this column existed -
+  // mirrors DataTable's own "first 6 columns" default when nothing is
+  // saved yet, just guaranteeing serialNumber is one of the six rather than
+  // getting silently pushed out of the default view like a brand new
+  // column otherwise would.
+  const effectiveVisibleColumns = useMemo(() => {
+    if (visibleColumns.length > 0) {
+      return visibleColumns.includes('serialNumber') ? visibleColumns : ['serialNumber', ...visibleColumns]
+    }
+    return ['serialNumber', ...tableColumns.filter(c => c.key !== 'serialNumber').slice(0, 5).map(c => c.key)]
+  }, [visibleColumns, tableColumns])
+
+  // Exports the full roster to .xlsx - a point-in-time snapshot the team
+  // can reference back to later, independent of whatever search/filter or
+  // column-visibility state the table happens to be in right now. Every
+  // column tableData carries goes into the file, not just the ones
+  // currently shown on screen, and it's available whatever the auction's
+  // status is (unlike editing, a read-only export is never unsafe).
+  const handleExportPlayers = async () => {
+    if (tableData.length === 0) {
+      setError('No players to export.')
+      return
+    }
+    try {
+      setExportingPlayers(true)
+      setError('')
+      // Loaded on demand, same as the upload path in excel-parser.ts - no
+      // reason to ship the full SheetJS bundle to every visitor of this
+      // page, only the ones who actually export.
+      const XLSX = await import('xlsx')
+
+      const rows = tableData.map(row => {
+        const rawRow = row as Record<string, any>
+        const exportRow: Record<string, string | number> = { '#': row.serialNumber ?? '' }
+        for (const col of columns) {
+          exportRow[col] = rawRow[col] ?? ''
+        }
+        exportRow['Last Year Price'] = row.lastYearPrice ?? ''
+        exportRow['Bidder Choice'] = row.isIcon ? 'Yes' : 'No'
+        exportRow['Status'] = row.status
+        exportRow['Added On'] = row.createdAt
+        return exportRow
+      })
+
+      const worksheet = XLSX.utils.json_to_sheet(rows)
+      const workbook = XLSX.utils.book_new()
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Players')
+
+      const datePart = new Date().toISOString().slice(0, 10)
+      const safeName = (auctionName || 'Auction').replace(/[\\/:*?"<>|]/g, '').trim() || 'Auction'
+      XLSX.writeFile(workbook, `${safeName} - Players - ${datePart}.xlsx`)
+    } catch (error) {
+      setError('Failed to export players.')
+      logger.error('Error exporting players:', error)
+    } finally {
+      setExportingPlayers(false)
+    }
+  }
 
   return (
     <div className="space-y-6 w-full max-w-full overflow-hidden">
@@ -694,9 +902,33 @@ export default function PlayerManagement() {
             Upload and manage players for this auction
           </p>
         </div>
-        <Button variant="outline" onClick={() => router.back()} className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700">
-          Back to Auctions
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* Read-only, so unlike editing this stays available whatever
+              the auction's status is - a snapshot to reference back to
+              can be pulled at any point, not just while editing is
+              allowed. */}
+          <Button
+            variant="outline"
+            onClick={handleExportPlayers}
+            disabled={exportingPlayers || tableData.length === 0}
+            className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700 disabled:opacity-50"
+          >
+            {exportingPlayers ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Exporting...
+              </>
+            ) : (
+              <>
+                <Download className="h-4 w-4 mr-2" />
+                Export to Excel
+              </>
+            )}
+          </Button>
+          <Button variant="outline" onClick={() => router.back()} className="bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-700">
+            Back to Auctions
+          </Button>
+        </div>
       </div>
 
       {/* Alerts */}
@@ -841,6 +1073,51 @@ export default function PlayerManagement() {
           </div>
           {statsUploadError && !statsDialogOpen && (
             <p className="text-sm text-red-600 dark:text-red-400 mt-2">{statsUploadError}</p>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* Assign Serial Number - a random permanent 1..N number for every
+          non-retired player (N = however many are non-retired right now).
+          This is the number printed on the physical plaque the team hands
+          the winning bidder, so it has to be assigned before the auction
+          runs and never change afterward - re-running this only fills in
+          players that still have none, never touches an already-numbered
+          one. */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center">
+            <Hash className="h-5 w-5 mr-2" />
+            Assign Serial Number
+          </CardTitle>
+          <CardDescription>
+            Randomly assigns each non-retired player a permanent number from 1 to the number of non-retired
+            players. Already-numbered players are never changed - safe to re-run after uploading more players
+            or retiring a few more.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Button
+            onClick={handleAssignSerialNumbers}
+            disabled={assigningSerialNumbers || !isEditingAllowed}
+            className="bg-teal-600 hover:bg-teal-700 text-white dark:bg-teal-600 dark:hover:bg-teal-700 disabled:opacity-50"
+          >
+            {assigningSerialNumbers ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Assigning...
+              </>
+            ) : (
+              <>
+                <Hash className="h-4 w-4 mr-2" />
+                Assign Serial Number
+              </>
+            )}
+          </Button>
+          {!isEditingAllowed && (
+            <p className="text-sm text-yellow-600 dark:text-yellow-400 mt-2">
+              Cannot assign serial numbers while the auction is LIVE or in MOCK_RUN mode.
+            </p>
           )}
         </CardContent>
       </Card>
@@ -1165,7 +1442,7 @@ export default function PlayerManagement() {
                 enableSelection={true}
                 selectedItems={selectedPlayerIds}
                 onSelectionChange={setSelectedPlayerIds}
-                visibleColumnsInitial={visibleColumns}
+                visibleColumnsInitial={effectiveVisibleColumns}
                 onVisibleColumnsChange={handleVisibleColumnsChange}
                 title={
                   <div className="flex items-center gap-2">

@@ -20,6 +20,8 @@ import { isLiveStatus } from '@/lib/auction-status'
 import { formatCurrency } from '@/lib/currency'
 import { extractCricheroesLink } from '@/lib/cricheroes'
 import { extractBattingStats, extractBowlingStats } from '@/lib/cricket-stats'
+import { extractProxyImageUrl, extractProfilePhotoValue, extractGoogleDriveFileId } from '@/lib/player-photo'
+import { extractPlayerName } from '@/lib/player-name'
 import PlayerCard from '@/components/player-card'
 import BidAmountStrip from '@/components/bid-amount-strip'
 import ActionButtons from '@/components/action-buttons'
@@ -96,6 +98,7 @@ interface PusherSaleUndoData {
   refundedAmount?: number
   bidderRemainingPurse?: number
   updatedBidders?: Array<{ id: string; remainingPurse: number }>
+  undoneType?: 'sold' | 'unsold'
 }
 
 interface PusherPlayerData {
@@ -125,20 +128,11 @@ interface BidConsolePanelProps {
   onClose?: () => void
 }
 
-// Same extraction the player card itself uses (duplicated inline there too -
-// see the imageUrl IIFE below) - kept standalone here since the prefetch
-// effect needs it before any player is actually being rendered.
+// Kept standalone (rather than calling extractProxyImageUrl directly) since
+// the prefetch effect needs it before any player is actually being
+// rendered, under its own established name at that call site.
 function extractPlayerImageUrl(data: Record<string, unknown> | null | undefined): string | undefined {
-  const keys = ['Profile Photo', 'profile photo', 'Profile photo', 'PROFILE PHOTO', 'profile_photo', 'ProfilePhoto']
-  const value = keys.map(key => data?.[key]).find(v => v && String(v).trim())
-  if (!value) return undefined
-  const photoStr = String(value).trim()
-  let match = photoStr.match(/\/d\/([a-zA-Z0-9_-]+)/)
-  if (match?.[1]) return `/api/proxy-image?id=${match[1]}`
-  match = photoStr.match(/[?&]id=([a-zA-Z0-9_-]+)/)
-  if (match?.[1]) return `/api/proxy-image?id=${match[1]}`
-  if (photoStr.startsWith('http://') || photoStr.startsWith('https://')) return photoStr
-  return undefined
+  return extractProxyImageUrl(data)
 }
 
 // A real, stable, module-scope component - NOT a useCallback/useMemo defined
@@ -561,7 +555,7 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
         maxPlayersCanBuy: maxTeamSize - 1,
         isFull,
         usingMandatoryTeamSize: !rules?.maxTeamSize && !!rules?.mandatoryTeamSize,
-        currentPlayerName: currentPlayer ? ((currentPlayer.data as any)?.Name || (currentPlayer.data as any)?.name) : 'none',
+        currentPlayerName: currentPlayer ? extractPlayerName(currentPlayer.data as any) : 'none',
         allPlayers: players.length,
         soldPlayers: players.filter(p => p.status === 'SOLD').length
       })
@@ -982,58 +976,66 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
         })
       }
       
-      // Update bidder balance
-      if (data.bidderRemainingPurse !== undefined && data.bidderId) {
-        setBidders(prev => prev.map(b => 
-          b.id === data.bidderId 
-            ? { ...b, remainingPurse: data.bidderRemainingPurse! }
-            : b
-        ))
-      } else if (data.updatedBidders) {
-        // Batch update multiple bidders
-        setBidders(prev => prev.map(b => {
-          const update = data.updatedBidders!.find(ub => ub.id === b.id)
-          return update ? { ...b, remainingPurse: update.remainingPurse } : b
-        }))
+      const isUnsoldUndo = data.undoneType === 'unsold'
+
+      // An unsold-undo never involved a bidder or purse - only a sold-undo
+      // needs this.
+      if (!isUnsoldUndo) {
+        if (data.bidderRemainingPurse !== undefined && data.bidderId) {
+          setBidders(prev => prev.map(b =>
+            b.id === data.bidderId
+              ? { ...b, remainingPurse: data.bidderRemainingPurse! }
+              : b
+          ))
+        } else if (data.updatedBidders) {
+          // Batch update multiple bidders
+          setBidders(prev => prev.map(b => {
+            const update = data.updatedBidders!.find(ub => ub.id === b.id)
+            return update ? { ...b, remainingPurse: update.remainingPurse } : b
+          }))
+        }
       }
-      
+
       // Reset current bid and highest bidder since the player is back to being available
       setCurrentBid(null)
       setHighestBidderId(null)
-      
-      // Remove only the "sold" entry for this player (keep all bids)
-      // Bids should only be removed via "undo bid" action
+
+      // Remove only the reverted event (sold or unsold) for this player -
+      // keep all bids, which should only be removed via "undo bid".
+      const revertedType = isUnsoldUndo ? 'unsold' : 'sold'
       const playerData = data.player?.data as any
-      const playerName = playerData?.Name || playerData?.name || 'Player'
+      const playerName = extractPlayerName(playerData) || 'Player'
       const undoEvent: BidHistoryEntry = {
         type: 'sale-undo' as const,
         playerId: data.playerId,
         playerName: playerName,
         timestamp: new Date(),
-        refundedAmount: data.refundedAmount
+        refundedAmount: isUnsoldUndo ? undefined : data.refundedAmount
       }
       setFullBidHistory(prev => {
-        // Remove only "sold" events for this player
-        // Keep all bids - bids should only be removed via "undo bid"
-        const filtered = prev.filter(entry => 
-          !(entry.playerId === data.player.id && entry.type === 'sold')
+        const filtered = prev.filter(entry =>
+          !(entry.playerId === data.player.id && entry.type === revertedType)
         )
         // Add the undo event at the beginning
         return [undoEvent, ...filtered]
       })
-      
+
       // Update bid history to show remaining bids for this player
       // Filter to only show bids for current player (excluding sold/unsold events)
       setBidHistory(prev => {
-        return prev.filter(entry => 
-          entry.playerId === data.player.id && 
-          entry.type !== 'sold' && 
+        return prev.filter(entry =>
+          entry.playerId === data.player.id &&
+          entry.type !== 'sold' &&
           entry.type !== 'unsold'
         )
       })
-      
+
       // Show success toast
-      toast.success(`Sale undone! Player restored and ₹${data.refundedAmount?.toLocaleString('en-IN') || 'amount'} refunded`)
+      if (isUnsoldUndo) {
+        toast.success(`Unsold undone! ${playerName} is back on the block.`)
+      } else {
+        toast.success(`Sale undone! Player restored and ₹${data.refundedAmount?.toLocaleString('en-IN') || 'amount'} refunded`)
+      }
   }, [])
 
   const handlePlayerSold = useCallback((data: PusherSoldData) => {
@@ -1086,7 +1088,7 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
       console.log('🎬 NEW PLAYER EVENT RECEIVED - Starting reveal animation:', data.player)
       console.log('🎬 Player data:', {
         id: data.player?.id,
-        name: (data.player?.data as any)?.Name || (data.player?.data as any)?.name,
+        name: extractPlayerName(data.player?.data as any),
         status: data.player?.status
       })
       
@@ -1103,7 +1105,7 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
       
       console.log('🎬 handleNewPlayer called (from Pusher):', {
         hasPlayer: !!data.player,
-        playerName: (data.player?.data as any)?.Name || (data.player?.data as any)?.name,
+        playerName: extractPlayerName(data.player?.data as any),
         showPlayerReveal: showPlayerRevealRef.current,
         hasPendingPlayer: !!pendingPlayerRef.current
       })
@@ -1150,7 +1152,7 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
       if (latestPendingPlayer) {
         console.log('✅ Setting current player from pending player:', latestPendingPlayer)
         console.log('✅ Player data:', latestPendingPlayer.data)
-        console.log('✅ Player name:', (latestPendingPlayer.data as any)?.Name || (latestPendingPlayer.data as any)?.name)
+        console.log('✅ Player name:', extractPlayerName(latestPendingPlayer.data as any))
         
         // Hide animation first
         setShowPlayerReveal(false)
@@ -1186,7 +1188,7 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
                   maxTeamSize,
                   maxPlayersCanBuy: maxTeamSize - 1,
                   isFull,
-                  newPlayerName: (latestPendingPlayer.data as any)?.Name || (latestPendingPlayer.data as any)?.name
+                  newPlayerName: extractPlayerName(latestPendingPlayer.data as any)
                 })
                 return currentPlayers // Return unchanged to not modify state
               })
@@ -1540,33 +1542,38 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
         setUndoSaleDialogOpen(false)
         // Real-time updates will come via Pusher event (handleSaleUndo)
         // But we can also update optimistically from API response
-        if (data.player && data.bidder) {
+        const isUnsoldUndo = data.undoneType === 'unsold'
+        if (data.player && (isUnsoldUndo || data.bidder)) {
           console.log('🔄 Updating state from API response (optimistic)')
-          
-          // Calculate refund amount from bidder balance change
-          const oldBidder = bidders.find(b => b.id === data.bidder.id)
+
+          // Calculate refund amount from bidder balance change - only
+          // meaningful for a sold-undo, which is the only case with a bidder.
+          const oldBidder = !isUnsoldUndo ? bidders.find(b => b.id === data.bidder.id) : undefined
           const refundAmount = oldBidder ? data.bidder.remainingPurse - oldBidder.remainingPurse : 0
-          
-          setPlayers(prev => prev.map(p => 
+
+          setPlayers(prev => prev.map(p =>
             p.id === data.player.id ? data.player : p
           ))
-          setBidders(prev => prev.map(b => 
-            b.id === data.bidder.id ? data.bidder : b
-          ))
+          if (!isUnsoldUndo) {
+            setBidders(prev => prev.map(b =>
+              b.id === data.bidder.id ? data.bidder : b
+            ))
+          }
           // Set the undone player as current player (API sets it as currentPlayerId)
           setCurrentPlayer(data.player)
-          
+
           // Reset bid state
           setCurrentBid(null)
           setHighestBidderId(null)
-          
-          // Remove the "sold" entry and all bids for this player from activity log
+
+          // Remove the reverted entry (and, for a sold-undo, all bids too) for
+          // this player from the activity log.
+          const revertedType = isUnsoldUndo ? 'unsold' : 'sold'
           const playerData = data.player.data as any
-          const playerName = playerData?.Name || playerData?.name || 'Player'
+          const playerName = extractPlayerName(playerData) || 'Player'
           setFullBidHistory(prev => {
-            // Remove the "sold" entry and all bid entries for this player
-            const filtered = prev.filter(entry => 
-              !(entry.playerId === data.player.id && (entry.type === 'sold' || entry.type === 'bid'))
+            const filtered = prev.filter(entry =>
+              !(entry.playerId === data.player.id && (entry.type === revertedType || (!isUnsoldUndo && entry.type === 'bid')))
             )
             // Add undo event at the beginning
             const undoEvent: BidHistoryEntry = {
@@ -1574,11 +1581,11 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
               playerId: data.player.id,
               playerName: playerName,
               timestamp: new Date(),
-              refundedAmount: refundAmount
+              refundedAmount: isUnsoldUndo ? undefined : refundAmount
             }
             return [undoEvent, ...filtered]
           })
-          
+
           // Clear bid history for this player to start fresh
           setBidHistory([])
         }
@@ -1602,7 +1609,7 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
   // Memoize player data extraction for performance
   const playerData = useMemo(() => getPlayerData(currentPlayer), [currentPlayer])
   const playerName = useMemo(() => {
-    return playerData.name || playerData.Name || 'No Player Selected'
+    return extractPlayerName(playerData) || 'No Player Selected'
   }, [playerData])
   // extractBattingStats/extractBowlingStats each rebuild a normalized map of
   // every field on the player's raw uploaded data - real work, previously
@@ -1661,9 +1668,11 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
     return null
   }, [currentPlayer, players])
 
-  // Check if there are any sold players (for showing Undo Last Sale button)
-  const hasSoldPlayers = useMemo(() => {
-    return players.some(p => p.status === 'SOLD')
+  // Check if there's any sold or unsold player to revert (for showing the
+  // Undo Last Action button) - it now undoes whichever happened more
+  // recently between the two, not just a sale.
+  const hasUndoableAction = useMemo(() => {
+    return players.some(p => p.status === 'SOLD' || p.status === 'UNSOLD')
   }, [players])
 
   // Preload images when player or bidders change
@@ -1722,7 +1731,7 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
     const names = allPlayers
       .map(p => {
         const data = p.data as any
-        return data?.name || data?.Name || data?.player_name || null
+        return extractPlayerName(data) || null
       })
       .filter((name): name is string => name !== null && name !== undefined && name !== '')
     
@@ -1739,7 +1748,7 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
   const pendingPlayerName = useMemo(() => {
     if (!pendingPlayer) return ''
     const data = pendingPlayer.data as any
-    return data?.name || data?.Name || data?.player_name || 'Unknown Player'
+    return extractPlayerName(data) || 'Unknown Player'
   }, [pendingPlayer])
 
   // Cleanup fallback timeout on unmount
@@ -2086,28 +2095,9 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
                   teamName: currentPlayer.lastYearTeamName,
                   auctionName: currentPlayer.lastYearAuctionName,
                 } : null}
+                serialNumber={currentPlayer?.serialNumber}
                 name={playerName}
-                imageUrl={(() => {
-                  const keys = ['Profile Photo', 'profile photo', 'Profile photo', 'PROFILE PHOTO', 'profile_photo', 'ProfilePhoto']
-                  const value = keys.map(key => playerData?.[key]).find(v => v && String(v).trim())
-                  if (!value) {
-                    console.log('DEBUG - Player data fields:', Object.keys(playerData))
-                    return undefined
-                  }
-                  const photoStr = String(value).trim()
-                  let match = photoStr.match(/\/d\/([a-zA-Z0-9_-]+)/)
-                  if (match && match[1]) {
-                    return `/api/proxy-image?id=${match[1]}`
-                  }
-                  match = photoStr.match(/[?&]id=([a-zA-Z0-9_-]+)/)
-                  if (match && match[1]) {
-                    return `/api/proxy-image?id=${match[1]}`
-                  }
-                  if (photoStr.startsWith('http://') || photoStr.startsWith('https://')) {
-                    return photoStr
-                  }
-                  return undefined
-                })()}
+                imageUrl={extractProxyImageUrl(playerData)}
                 basePrice={(currentPlayer?.data as any)?.['Base Price'] || (currentPlayer?.data as any)?.['base price'] || 1000}
                 tags={((currentPlayer as any)?.isIcon || (currentPlayer?.data as any)?.isIcon) ? [{ label: 'Bidder Choice', color: 'purple' }] : []}
                 profileLink={cricherosLink}
@@ -2142,7 +2132,7 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
                   <ActionButtons
                     onMarkSold={handleMarkSold}
                     onMarkUnsold={handleMarkUnsold}
-                    onUndoSale={hasSoldPlayers ? () => setUndoSaleDialogOpen(true) : undefined}
+                    onUndoSale={hasUndoableAction ? () => setUndoSaleDialogOpen(true) : undefined}
                     isMarkingSold={isMarkingSold}
                     isMarkingUnsold={isMarkingUnsold}
                     hasBids={bidHistory.length > 0 || currentBid !== null}
@@ -2156,7 +2146,7 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
           <CardHeader className="hidden">
                 <div className="flex flex-col items-center gap-3">
                   {(() => {
-                    const profilePhotoLink = playerData['Profile Photo'] || playerData['profile photo'] || playerData['Profile photo']
+                    const profilePhotoLink = extractProfilePhotoValue(playerData)
                     
                     // If no profile photo, show placeholder with player name
                     if (!profilePhotoLink) {
@@ -2180,14 +2170,8 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
                     }
                     
                     // Extract file ID from the Google Drive URL
-                    const fileId = profilePhotoLink.includes('/file/d/') 
-                      ? profilePhotoLink.match(/\/file\/d\/([a-zA-Z0-9-_]+)/)?.[1]
-                      : profilePhotoLink.includes('open?id=')
-                      ? profilePhotoLink.match(/open\?id=([a-zA-Z0-9-_]+)/)?.[1]
-                      : profilePhotoLink.includes('id=')
-                      ? profilePhotoLink.match(/id=([a-zA-Z0-9-_]+)/)?.[1]
-                      : null
-                      
+                    const fileId = extractGoogleDriveFileId(profilePhotoLink)
+
                     // Use proxy API to bypass CORB
                     const proxyImageUrl = fileId ? `/api/proxy-image?id=${fileId}` : null
                       
@@ -3232,15 +3216,15 @@ export function AdminAuctionView({ auction, currentPlayer: initialPlayer, stats:
     <AlertDialog open={undoSaleDialogOpen} onOpenChange={setUndoSaleDialogOpen}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Undo Last Sale?</AlertDialogTitle>
+          <AlertDialogTitle>Undo Last Action?</AlertDialogTitle>
           <AlertDialogDescription>
-            This will restore the last sold player back to the auction and refund the bidder. This action cannot be undone.
+            This will revert whichever happened most recently - a sale (restoring the player and refunding the bidder) or marking a player unsold (putting them back on the block). This action cannot be undone.
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>
           <AlertDialogCancel>Cancel</AlertDialogCancel>
           <AlertDialogAction onClick={handleUndoSaleConfirm} className="bg-red-600 hover:bg-red-700 text-white">
-            Undo Sale
+            Undo Action
           </AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>

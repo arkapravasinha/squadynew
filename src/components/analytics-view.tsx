@@ -9,6 +9,8 @@ import { PlayerTable } from '@/components/analytics/player-table'
 import { BidAnalytics } from '@/components/analytics/bid-analytics'
 import { BidderPrioritiesUpload } from '@/components/analytics/bidder-priorities-upload'
 import { Auction, Player, Bidder } from '@prisma/client'
+import { extractProxyImageUrl } from '@/lib/player-photo'
+import { extractPlayerName } from '@/lib/player-name'
 
 interface AnalyticsViewProps {
   auction: Auction & {
@@ -55,40 +57,7 @@ export function AnalyticsView({ auction, currentPlayer, bidHistory }: AnalyticsV
     const data = localCurrentPlayer.data as any
     
     // Extract profile photo with proper Google Drive handling
-    const getImageUrl = () => {
-      const profilePhotoLink = data?.['Profile Photo'] || 
-                              data?.['profile photo'] || 
-                              data?.['Profile photo'] || 
-                              data?.['PROFILE PHOTO'] || 
-                              data?.['profile_photo'] ||
-                              data?.['ProfilePhoto']
-      
-      if (!profilePhotoLink || profilePhotoLink === '') {
-        return undefined
-      }
-      
-      const photoStr = String(profilePhotoLink).trim()
-      
-      // Try to extract Google Drive ID from various formats
-      // Format 1: https://drive.google.com/file/d/[ID]/view
-      let match = photoStr.match(/\/d\/([a-zA-Z0-9_-]+)/)
-      if (match && match[1]) {
-        return `/api/proxy-image?id=${match[1]}`
-      }
-      
-      // Format 2: https://drive.google.com/open?id=[ID]
-      match = photoStr.match(/[?&]id=([a-zA-Z0-9_-]+)/)
-      if (match && match[1]) {
-        return `/api/proxy-image?id=${match[1]}`
-      }
-      
-      // If it's already a valid URL, use it directly
-      if (photoStr.startsWith('http://') || photoStr.startsWith('https://')) {
-        return photoStr
-      }
-      
-      return undefined
-    }
+    const getImageUrl = () => extractProxyImageUrl(data)
     
     // Extract profile link
     const getProfileLink = () => {
@@ -102,7 +71,7 @@ export function AnalyticsView({ auction, currentPlayer, bidHistory }: AnalyticsV
     }
     
     return {
-      name: data?.Name || data?.name || 'Unknown Player',
+      name: extractPlayerName(data) || 'Unknown Player',
       speciality: data?.Speciality || 'N/A',
       batting: data?.['Batting Type'] || data?.batting || 'N/A',
       bowling: data?.['Bowling Type'] || data?.bowling || 'N/A',

@@ -3,6 +3,8 @@
 import { useRef } from 'react'
 import { Badge } from '@/components/ui/badge'
 import Image from 'next/image'
+import { extractProxyImageUrl } from '@/lib/player-photo'
+import { extractPlayerName } from '@/lib/player-name'
 
 interface PlayerData {
   [key: string]: unknown
@@ -50,47 +52,14 @@ interface TeamSquadPosterProps {
  * Get player profile photo URL
  */
 function getProfilePhotoUrl(playerData: PlayerData): string | undefined {
-  const possibleKeys = [
-    'Profile Photo',
-    'profile photo',
-    'Profile photo',
-    'PROFILE PHOTO',
-    'profile_photo',
-    'ProfilePhoto'
-  ]
-
-  const rawValue = possibleKeys
-    .map(key => playerData?.[key])
-    .find(value => value !== undefined && value !== null && String(value).trim() !== '')
-
-  if (!rawValue) {
-    return undefined
-  }
-
-  const photoStr = String(rawValue).trim()
-
-  let match = photoStr.match(/\/d\/([a-zA-Z0-9_-]+)/)
-  if (match && match[1]) {
-    return `/api/proxy-image?id=${match[1]}`
-  }
-
-  match = photoStr.match(/[?&]id=([a-zA-Z0-9_-]+)/)
-  if (match && match[1]) {
-    return `/api/proxy-image?id=${match[1]}`
-  }
-
-  if (photoStr.startsWith('http://') || photoStr.startsWith('https://')) {
-    return photoStr
-  }
-
-  return undefined
+  return extractProxyImageUrl(playerData)
 }
 
 /**
  * Get player name from data
  */
 function getPlayerName(playerData: PlayerData): string {
-  return playerData?.name || playerData?.Name || playerData?.player_name || 'Unknown Player'
+  return extractPlayerName(playerData) || 'Unknown Player'
 }
 
 /**

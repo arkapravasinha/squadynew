@@ -3,12 +3,10 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { FullScreenCountdown } from './full-screen-countdown'
 import { PublicAuctionView } from './public-auction-view'
-import { ProfessioPromoButton } from './professio-promo-button'
-import FloatingPromoChip from './floating-promo-chip'
 import Link from 'next/link'
 import Image from 'next/image'
 import { Button } from '@/components/ui/button'
-import { Eye, ExternalLink, Instagram, LogIn, Search, ChevronDown, Calendar, ArrowUpDown } from 'lucide-react'
+import { Eye, ExternalLink, Instagram, LogIn, Search, ChevronDown, Calendar, ArrowUpDown, LayoutGrid, Table as TableIcon } from 'lucide-react'
 import { AddToCalendar } from './add-to-calendar'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -18,6 +16,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { isLiveStatus } from '@/lib/auction-status'
 import { extractCricheroesLink } from '@/lib/cricheroes'
 import { extractBattingStats, extractBowlingStats } from '@/lib/cricket-stats'
+import { extractProxyImageUrl } from '@/lib/player-photo'
+import { extractPlayerName } from '@/lib/player-name'
 import { BatIcon, BallIcon } from '@/components/cricket-stat-ui'
 import { PlayerStatsDialog } from '@/components/player-stats-dialog'
 import { AuctionStatus } from '@prisma/client'
@@ -47,19 +47,23 @@ interface CountdownToLiveWrapperProps {
 // and color - purely presentational, reusing the same substring checks the
 // filter buttons below already use, so a card's flag always agrees with
 // which filter bucket it falls into.
+// Backgrounds are translucent (rgba, not solid hex) - the ribbon sits
+// directly over the top of the player's photo, so a fully opaque fill was
+// blocking out the face beneath it. Text stays fully opaque so the label
+// itself doesn't lose legibility.
 function getRoleFlag(role?: string, specialty?: string): { label: string; background: string; color: string } | null {
   const text = `${role || ''} ${specialty || ''}`.toLowerCase()
   if (text.includes('wicket') || text.includes('keeper')) {
-    return { label: 'Wicketkeeper', background: 'rgba(255,255,255,0.92)', color: '#05070a' }
+    return { label: 'Wicketkeeper', background: 'rgba(255,255,255,0.6)', color: '#05070a' }
   }
   if (text.includes('all-rounder') || text.includes('allrounder') || text.includes('all rounder')) {
-    return { label: 'All-Rounder', background: 'linear-gradient(90deg,#a855f7,#ec4899)', color: '#ffffff' }
+    return { label: 'All-Rounder', background: 'linear-gradient(90deg,rgba(168,85,247,0.6),rgba(236,72,153,0.6))', color: '#ffffff' }
   }
   if (text.includes('bowler')) {
-    return { label: 'Bowler', background: '#14b8a6', color: '#04211d' }
+    return { label: 'Bowler', background: 'rgba(20,184,166,0.6)', color: '#04211d' }
   }
   if (text.includes('batsman') || text.includes('batter')) {
-    return { label: 'Batsman', background: '#fbbf24', color: '#1a1200' }
+    return { label: 'Batsman', background: 'rgba(251,191,36,0.6)', color: '#1a1200' }
   }
   return null
 }
@@ -79,6 +83,10 @@ export function CountdownToLiveWrapper({
   const [fullScreenImage, setFullScreenImage] = useState<string | null>(null)
   const [playerFilter, setPlayerFilter] = useState<'all' | 'batsmen' | 'bowlers' | 'all-rounders' | 'bidders' | 'bidder-choice'>('all')
   const [searchQuery, setSearchQuery] = useState('')
+  // Photo-card grid (the default) vs. a dense table for scanning many
+  // players' name/last-year-price/stats at once without scrolling through
+  // a full card per player.
+  const [viewMode, setViewMode] = useState<'grid' | 'table'>('grid')
   // Sorts by lastYearPrice (see auction-history.ts) - the price this player
   // actually went for in a linked previous auction, not this auction's
   // current/base price. Players with no match sort to the end regardless
@@ -101,24 +109,7 @@ export function CountdownToLiveWrapper({
   const knowYourPlayersCards = useMemo(() => {
     return auction.players.map(player => {
       const playerData = player.data as any
-      const imageUrl = (() => {
-        const keys = ['Profile Photo', 'profile photo', 'Profile photo', 'PROFILE PHOTO', 'profile_photo', 'ProfilePhoto']
-        const value = keys.map(key => playerData?.[key]).find(v => v && String(v).trim())
-        if (!value) return undefined
-        const photoStr = String(value).trim()
-        let match = photoStr.match(/\/d\/([a-zA-Z0-9_-]+)/)
-        if (match && match[1]) {
-          return `/api/proxy-image?id=${match[1]}`
-        }
-        match = photoStr.match(/[?&]id=([a-zA-Z0-9_-]+)/)
-        if (match && match[1]) {
-          return `/api/proxy-image?id=${match[1]}`
-        }
-        if (photoStr.startsWith('http://') || photoStr.startsWith('https://')) {
-          return photoStr
-        }
-        return undefined
-      })()
+      const imageUrl = extractProxyImageUrl(playerData)
       const specialty = playerData?.Speciality || playerData?.speciality || playerData?.specialty
       const role = playerData?.Role || playerData?.role || ''
       const statsSummary = [
@@ -144,7 +135,7 @@ export function CountdownToLiveWrapper({
 
       return {
         id: player.id,
-        name: playerData?.name || playerData?.Name || playerData?.player_name || 'Unknown Player',
+        name: extractPlayerName(playerData) || 'Unknown Player',
         imageUrl,
         specialty,
         role,
@@ -158,6 +149,7 @@ export function CountdownToLiveWrapper({
         cricherosLink,
         lastYearPrice: player.lastYearPrice as number | null | undefined,
         lastYearTeamName: player.lastYearTeamName as string | null | undefined,
+        serialNumber: player.serialNumber as number | null | undefined,
         battingStats: extractBattingStats(playerData),
         bowlingStats: extractBowlingStats(playerData),
       }
@@ -356,14 +348,13 @@ export function CountdownToLiveWrapper({
           <div className="max-w-7xl mx-auto px-3 sm:px-6 lg:px-8">
             <div className="flex justify-between items-center h-14 sm:h-16">
               <Link href="/" className="flex flex-col items-start justify-center flex-shrink-0">
-                <Image 
-                  src="/squady-logo.svg" 
-                  alt="Squady" 
-                  width={100} 
-                  height={33} 
+                <Image
+                  src="/squady-logo.svg"
+                  alt="Squady"
+                  width={100}
+                  height={33}
                   className="h-6 sm:h-7 w-auto brightness-0 invert"
                 />
-                <span className="text-[8px] sm:text-[9px] text-white/60 mt-0.5">Powered by Professio</span>
               </Link>
               <div className="flex items-center gap-0.5 sm:gap-3">
                 {/* Instagram Icon */}
@@ -375,16 +366,6 @@ export function CountdownToLiveWrapper({
                   aria-label="Follow us on Instagram"
                 >
                   <Instagram className="h-4 w-4 sm:h-5 sm:w-5" />
-                </a>
-                {/* Powered by Professio - Desktop only */}
-                <a 
-                  href="https://professio.ai/?utm_source=squady&utm_medium=referral&utm_campaign=powered_by_badge" 
-                target="_blank" 
-                rel="noopener noreferrer" 
-                  className="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded-md border text-xs border-white/50 bg-white/25 backdrop-blur-md text-white hover:bg-white/35 transition-colors shadow-sm whitespace-nowrap"
-                >
-                  <span className="hidden md:inline">Powered by</span>
-                  <span className="font-semibold">Professio AI</span>
                 </a>
                 <Link href="/tutorial">
                   <Button variant="ghost" size="sm" className="text-[9px] sm:text-sm text-white hover:text-gray-100 hover:bg-white/20 h-7 sm:h-9 px-1.5 sm:px-3">
@@ -532,6 +513,7 @@ export function CountdownToLiveWrapper({
                 <div>
                   <CardTitle className="text-base sm:text-lg font-black uppercase tracking-tight text-white">Know Your Players</CardTitle>
                   <p className="text-xs sm:text-sm text-white/50 mt-1">Walk the tunnel before the gates open.</p>
+                  <p className="text-[9px] text-white/25 mt-0.5">Stats accurate as of 15 September 2026</p>
                 </div>
                 <Badge className="bg-amber-400/15 text-amber-400 border-amber-400/30 text-[10px] sm:text-xs">Player Pool</Badge>
               </div>
@@ -539,6 +521,34 @@ export function CountdownToLiveWrapper({
             <CardContent className="pt-0">
               {/* Search and Filter Section */}
               <div className="mb-4 sm:mb-6 space-y-3">
+                {/* View toggle - photo-card grid vs. a dense scannable table */}
+                <div className="flex justify-end">
+                  <div className="inline-flex rounded-lg border border-white/15 bg-white/[0.06] p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('grid')}
+                      aria-pressed={viewMode === 'grid'}
+                      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-colors ${
+                        viewMode === 'grid' ? 'bg-amber-400 text-[#1a1200]' : 'text-white/50 hover:text-white'
+                      }`}
+                    >
+                      <LayoutGrid className="h-3.5 w-3.5" />
+                      Cards
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode('table')}
+                      aria-pressed={viewMode === 'table'}
+                      className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-[10px] sm:text-xs font-bold transition-colors ${
+                        viewMode === 'table' ? 'bg-amber-400 text-[#1a1200]' : 'text-white/50 hover:text-white'
+                      }`}
+                    >
+                      <TableIcon className="h-3.5 w-3.5" />
+                      Table
+                    </button>
+                  </div>
+                </div>
+
                 {/* Search Input */}
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-white/35" />
@@ -675,8 +685,93 @@ export function CountdownToLiveWrapper({
                     ? 'Player list not available yet. Check back soon!'
                     : `No players found${playerFilter !== 'all' ? ` for ${playerFilter}` : ''}.`}
                 </div>
+              ) : viewMode === 'table' ? (
+                <div className="overflow-x-auto rounded-xl border border-white/10">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-white/[0.04] text-white/50 text-[9px] sm:text-[10px] uppercase tracking-wider">
+                        <th className="text-center px-3 py-2 font-bold w-12">#</th>
+                        <th className="text-left px-3 py-2 font-bold">Player</th>
+                        <th className="text-right px-3 py-2 font-bold whitespace-nowrap">Last Year Price</th>
+                        <th className="text-center px-3 py-2 font-bold">Batting</th>
+                        <th className="text-center px-3 py-2 font-bold">Bowling</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleKnowYourPlayersCards.map(card => (
+                        <tr key={card.id} className="border-t border-white/10 hover:bg-white/[0.03]">
+                          <td className="px-3 py-2 text-center">
+                            {card.serialNumber != null ? (
+                              <span className="inline-flex items-center justify-center min-w-[1.75rem] h-7 px-1.5 rounded-md bg-gradient-to-br from-amber-400 to-amber-600 text-[#1a1200] font-black text-xs tabular-nums">
+                                {card.serialNumber}
+                              </span>
+                            ) : (
+                              <span className="text-white/20 text-xs">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 max-w-[160px] sm:max-w-none">
+                            <div className="flex items-center gap-2 min-w-0">
+                              {card.imageUrl ? (
+                                <img
+                                  src={card.imageUrl}
+                                  alt={card.name}
+                                  className="w-8 h-8 rounded-full object-cover flex-shrink-0"
+                                  loading="lazy"
+                                  onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none' }}
+                                />
+                              ) : (
+                                <div className="w-8 h-8 rounded-full bg-white/[0.08] flex items-center justify-center flex-shrink-0">
+                                  <span className="text-xs font-bold text-white">{card.name.charAt(0).toUpperCase()}</span>
+                                </div>
+                              )}
+                              <div className="min-w-0">
+                                <p className="text-white font-bold text-xs sm:text-sm truncate">{card.name}</p>
+                                {(card.statsSummary || card.specialty) && (
+                                  <p className="text-white/40 text-[9px] sm:text-[10px] truncate">{card.statsSummary || card.specialty}</p>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-3 py-2 text-right whitespace-nowrap">
+                            {card.lastYearPrice != null ? (
+                              <span className="text-amber-300 font-bold text-xs sm:text-sm">₹{card.lastYearPrice.toLocaleString('en-IN')}</span>
+                            ) : (
+                              <span className="text-white/25 text-xs">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            {card.battingStats ? (
+                              <button
+                                type="button"
+                                onClick={() => setStatsDialogTarget({ id: card.id, discipline: 'batting' })}
+                                className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wide text-teal-300"
+                              >
+                                View More
+                              </button>
+                            ) : (
+                              <span className="text-white/20 text-xs">—</span>
+                            )}
+                          </td>
+                          <td className="px-3 py-2 text-center">
+                            {card.bowlingStats ? (
+                              <button
+                                type="button"
+                                onClick={() => setStatsDialogTarget({ id: card.id, discipline: 'bowling' })}
+                                className="text-[9px] sm:text-[10px] font-extrabold uppercase tracking-wide text-teal-300"
+                              >
+                                View More
+                              </button>
+                            ) : (
+                              <span className="text-white/20 text-xs">—</span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               ) : (
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3 sm:gap-4">
+                <div className="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-2 sm:gap-3 md:gap-4">
                   {visibleKnowYourPlayersCards.map(card => {
                     const isBidder = card.statusLabel === 'Bidder'
                     // Discipline flag on the top border - null for a bidder/team
@@ -693,19 +788,37 @@ export function CountdownToLiveWrapper({
                             the old plain role text line beneath the name */}
                         {roleFlag && (
                           <div
-                            className="absolute top-0 left-1/2 -translate-x-1/2 z-20 text-center"
-                            style={{ width: 96, padding: '7px 0 15px 0', background: roleFlag.background, clipPath: 'polygon(0% 0%,100% 0%,100% 66%,50% 100%,0% 66%)' }}
+                            className="absolute top-0 left-1/2 -translate-x-1/2 z-20 text-center backdrop-blur-[2px]"
+                            style={{ width: 132, padding: '6px 6px 9px 6px', background: roleFlag.background, clipPath: 'polygon(0% 0%,100% 0%,100% 66%,50% 100%,0% 66%)' }}
                           >
-                            <span className="text-[9px] font-black uppercase tracking-wide" style={{ color: roleFlag.color }}>{roleFlag.label}</span>
+                            {/* whiteSpace: nowrap is load-bearing here - "All-Rounder"
+                                has a hyphen, which browsers treat as a valid line-break
+                                point, so without this the label wraps to two lines and
+                                the ribbon (sized for one) doubles in height, hanging
+                                down over the player's face instead of sitting near the
+                                top edge. */}
+                            <span className="text-[9px] font-black uppercase tracking-wide" style={{ color: roleFlag.color, whiteSpace: 'nowrap' }}>{roleFlag.label}</span>
                           </div>
                         )}
 
                         {/* Player Photo - Portrait Style */}
                         <div
-                          className="relative h-48 sm:h-56 flex items-center justify-center cursor-pointer group/photo"
+                          className="relative h-36 sm:h-56 flex items-center justify-center cursor-pointer group/photo"
                           style={{ background: 'radial-gradient(circle at 50% 22%, #1b1f27, #05070a 75%)' }}
                           onClick={() => card.imageUrl && setFullScreenImage(card.imageUrl)}
                         >
+                          {/* Auction number plaque - the permanent number
+                              printed on the physical placard the team hands
+                              the winning bidder, so it needs to read big and
+                              bold here too. Top-left of the photo box is the
+                              one corner not already used by the discipline
+                              ribbon (top-center) or the bidder-choice/status
+                              badges (bottom corners). */}
+                          {card.serialNumber != null && (
+                            <div className="absolute top-2 left-2 z-20 flex items-center justify-center w-9 h-9 sm:w-12 sm:h-12 rounded-lg sm:rounded-xl bg-gradient-to-br from-amber-400 to-amber-600 border-2 border-white/90 shadow-lg">
+                              <span className="text-sm sm:text-lg font-black text-[#1a1200] tabular-nums leading-none">{card.serialNumber}</span>
+                            </div>
+                          )}
                           {card.imageUrl ? (
                             <>
                               <img
@@ -725,7 +838,7 @@ export function CountdownToLiveWrapper({
                               </div>
                             </>
                           ) : (
-                            <div className={`w-24 h-24 sm:w-28 sm:h-28 rounded-full flex items-center justify-center ${isBidder ? 'bg-purple-500/20 border border-purple-400/40' : 'bg-white/[0.08]'}`}>
+                            <div className={`w-16 h-16 sm:w-28 sm:h-28 rounded-full flex items-center justify-center ${isBidder ? 'bg-purple-500/20 border border-purple-400/40' : 'bg-white/[0.08]'}`}>
                               <span className="text-3xl sm:text-4xl font-bold text-white">
                                 {card.name.charAt(0).toUpperCase()}
                               </span>
@@ -890,9 +1003,6 @@ export function CountdownToLiveWrapper({
           </Card>
         </div>
 
-        {/* Professio AI Promo Button at Bottom */}
-        <ProfessioPromoButton />
-        
         {/* Full Screen Image Modal */}
         <Dialog open={!!fullScreenImage} onOpenChange={(o) => { if (!o) setFullScreenImage(null) }}>
           <DialogContent className="max-w-full w-full h-full p-0 bg-black/95">
@@ -957,7 +1067,6 @@ export function CountdownToLiveWrapper({
                   height={33} 
                   className="h-6 sm:h-7 w-auto brightness-0 invert"
                 />
-                <span className="text-[8px] sm:text-[9px] text-white/60 mt-0.5">Powered by Professio</span>
               </Link>
               <div className="flex items-center gap-0.5 sm:gap-3">
                 {/* Instagram Icon */}
@@ -969,16 +1078,6 @@ export function CountdownToLiveWrapper({
                   aria-label="Follow us on Instagram"
                 >
                   <Instagram className="h-4 w-4 sm:h-5 sm:w-5" />
-                </a>
-                {/* Powered by Professio - Desktop only */}
-                <a 
-                  href="https://professio.ai/?utm_source=squady&utm_medium=referral&utm_campaign=powered_by_badge" 
-                  target="_blank" 
-                  rel="noopener noreferrer" 
-                  className="hidden sm:inline-flex items-center gap-1 px-2 py-1 rounded-md border text-xs border-white/50 bg-white/25 backdrop-blur-md text-white hover:bg-white/35 transition-colors shadow-sm whitespace-nowrap"
-                >
-                  <span className="hidden md:inline">Powered by</span>
-                  <span className="font-semibold">Professio AI</span>
                 </a>
                 <Link href="/tutorial">
                   <Button variant="ghost" size="sm" className="text-[9px] sm:text-sm text-white hover:text-gray-100 hover:bg-white/20 h-7 sm:h-9 px-1.5 sm:px-3">
@@ -1076,9 +1175,6 @@ export function CountdownToLiveWrapper({
             </div>
           </div>
         </div>
-        
-        {/* Floating Professio AI Button */}
-        <FloatingPromoChip variant="purple" sessionKey="timer_professio_promo" />
       </div>
     )
   }
@@ -1118,10 +1214,6 @@ export function CountdownToLiveWrapper({
               <Image src="/squady-logo.svg" alt="Squady" width={120} height={40} className="h-8 w-auto" />
             </Link>
             <div className="flex items-center gap-4">
-              <a href="https://professio.ai/?utm_source=squady&utm_medium=referral&utm_campaign=powered_by_badge" target="_blank" rel="noopener noreferrer" className="hidden sm:inline-flex items-center gap-1.5 px-2 py-1 rounded-md border text-xs bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800 shadow-sm hover:from-purple-100 hover:to-pink-100 dark:hover:from-purple-900/30 dark:hover:to-pink-900/30 animate-pulse">
-                <span className="hidden sm:inline">Powered by</span>
-                <span className="font-semibold">Professio AI</span>
-              </a>
               <Link href="/register">
                 <button className="text-sm px-3 py-1.5 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md">
                   Register
@@ -1136,16 +1228,6 @@ export function CountdownToLiveWrapper({
           </div>
         </div>
       </header>
-      {/* Mobile promo banner */}
-      <div className="sm:hidden bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
-        <div className="px-4 py-2 flex justify-center">
-          <a href="https://professio.ai/?utm_source=squady&utm_medium=referral&utm_campaign=powered_by_badge" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-2 px-2 py-1 rounded-md border text-xs bg-gradient-to-r from-purple-50 to-pink-50 dark:from-purple-900/20 dark:to-pink-900/20 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800 shadow-sm animate-pulse">
-            <span>Powered by</span>
-            <span className="font-semibold">Professio AI</span>
-          </a>
-        </div>
-      </div>
-      
       {/* Breadcrumbs - Hidden on mobile for public view */}
       <div className="hidden sm:block bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700">
         <div className="max-w-full mx-auto px-4 sm:px-6 py-3">
@@ -1168,9 +1250,6 @@ export function CountdownToLiveWrapper({
         bidHistory={bidHistory}
         bidders={bidders}
       />
-      
-      {/* Floating Professio AI Button */}
-      <FloatingPromoChip variant="purple" sessionKey="live_auction_professio_promo" />
     </div>
   )
 }

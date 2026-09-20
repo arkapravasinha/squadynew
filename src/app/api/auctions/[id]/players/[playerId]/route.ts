@@ -4,6 +4,8 @@ import { prisma } from '@/lib/prisma'
 import { authOptions } from '@/app/api/auth/[...nextauth]/config'
 import bcrypt from 'bcryptjs'
 import { invalidateAuction, invalidatePlayers } from '@/lib/cache'
+import { extractProfilePhotoValue, extractGoogleDriveFileId } from '@/lib/player-photo'
+import { extractPlayerName } from '@/lib/player-name'
 
 // GET /api/auctions/[id]/players/[playerId] - Get specific player
 export async function GET(
@@ -62,7 +64,7 @@ export async function PUT(
       )
     }
 
-    const { data, name, status, isIcon } = await request.json()
+    const { data, name, status, isIcon, lastYearPrice } = await request.json()
 
     // Check if player exists and belongs to user's auction
     const existingPlayer = await prisma.player.findFirst({
@@ -116,7 +118,20 @@ export async function PUT(
       ...(data && { data: data as any }),
       ...(status && { status }),
     }
-    
+
+    // lastYearPrice is a manual correction for the auction-history matcher's
+    // guess (link/name matching can miss or mismatch) - null clears it back
+    // to "no match", any other value must be a valid non-negative number.
+    if (lastYearPrice !== undefined) {
+      if (lastYearPrice !== null && (typeof lastYearPrice !== 'number' || !Number.isFinite(lastYearPrice) || lastYearPrice < 0)) {
+        return NextResponse.json(
+          { error: 'lastYearPrice must be a non-negative number or null' },
+          { status: 400 }
+        )
+      }
+      updateData.lastYearPrice = lastYearPrice
+    }
+
     // Add isIcon if it's defined and the field exists in the database
     if (isIcon !== undefined) {
       try {
@@ -137,7 +152,7 @@ export async function PUT(
     // If retiring player, create a bidder record for them
     if (status === 'RETIRED' && existingPlayer.status !== 'RETIRED') {
       const playerData = player.data as any
-      const playerName = playerData?.name || playerData?.Name || 'Retired Player'
+      const playerName = extractPlayerName(playerData) || 'Retired Player'
       const teamName = playerData?.['Team Name'] || playerData?.['team name'] || playerData?.teamName || playerName
       
       // Check if bidder already exists
@@ -183,14 +198,12 @@ export async function PUT(
         }
 
         // Get profile photo URL for bidderPhotoUrl (NOT logoUrl - logoUrl is for team logo from form upload)
-        const photoKeys = ['Profile Photo', 'profile photo', 'Profile photo', 'PROFILE PHOTO', 'profile_photo', 'ProfilePhoto']
-        const photoValue = photoKeys.map(key => playerData?.[key]).find(v => v && String(v).trim())
+        const photoValue = extractProfilePhotoValue(playerData)
         let bidderPhotoUrl = null
         if (photoValue) {
-          const photoStr = String(photoValue).trim()
-          const match = photoStr.match(/\/d\/([a-zA-Z0-9_-]+)/)
-          if (match && match[1]) {
-            bidderPhotoUrl = `/api/proxy-image?id=${match[1]}`
+          const fileId = extractGoogleDriveFileId(photoValue)
+          if (fileId) {
+            bidderPhotoUrl = `/api/proxy-image?id=${fileId}`
           }
         }
 
@@ -211,8 +224,12 @@ export async function PUT(
       }
     }
 
-    // If un-retiring player, delete bidder record
-    if (status !== 'RETIRED' && existingPlayer.status === 'RETIRED') {
+    // If un-retiring player, delete bidder record. Only when this request
+    // actually specified a status - a partial update that only touches, say,
+    // lastYearPrice must not be read as "un-retiring" just because it left
+    // status out of the body (undefined !== 'RETIRED' would otherwise match
+    // here for every already-retired player on every unrelated edit).
+    if (status !== undefined && status !== 'RETIRED' && existingPlayer.status === 'RETIRED') {
       await prisma.bidder.deleteMany({
         where: {
           auctionId: params.id,
